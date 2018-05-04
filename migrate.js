@@ -3,6 +3,7 @@ let mysql = require('mysql');
 let xmlJs = require('xml-js');
 require('dotenv').config();
 
+// get all months in date range
 function dateRange(startDate, endDate) {
     let start      = startDate.split('-');
     let end        = endDate.split('-');
@@ -24,6 +25,7 @@ function dateRange(startDate, endDate) {
 
 let log = process.argv.includes('--verbose') || process.argv.includes('-v');
 
+// get from and to dates
 let from = process.env.DATE_FROM;
 let cur = new Date();
 cur.setMonth(cur.getMonth() + 1);
@@ -32,18 +34,24 @@ let dates = dateRange(from, to);
 dates[0] = from;
 let promises = [];
 
+// create Tempo API requests promises
 for(let i = 0; i < dates.length - 1; i++) {
     promises.push(axios.get('https://app.tempo.io/api/1/getWorklog?dateFrom=' + dates[i] + '&dateTo=' + dates[i + 1] + '&format=xml&baseUrl='  + process.env.BASE_URL + '&tempoApiToken=' + process.env.TEMPO_API_TOKEN));
 }
 
-
+// run all requests at once
 Promise.all(promises).then((values) => {
     let logs = [];
+    // parse XML
     for(let value of values) {
         let response = JSON.parse(xmlJs.xml2json(value.data, {compact: true, spaces: 4}));
-        logs = logs.concat(response.worklogs.worklog);
+        let worklog = response.worklogs.worklog;
+        if(Array.isArray(worklog)) {
+            logs = logs.concat(response.worklogs.worklog);
+        }
     }
 
+    // connect to DB
     let con = mysql.createConnection({
         host: process.env.DB_HOST,
         user: process.env.DB_USER,
@@ -54,8 +62,20 @@ Promise.all(promises).then((values) => {
         if (err) throw err;
         if(log) console.log("Connected!");
 
+        let corruptedUsernamesCount = 0;
+        let corruptedJiraIdsCount = 0;
+
         for(let log of logs) {
+            // run SQL UPDATE for each worklog
+            if(typeof log.username === 'undefined') {
+                corruptedUsernamesCount++;
+                continue;
+            }
             let user = log.username._text;
+            if(typeof log.jira_worklog_id === 'undefined') {
+                corruptedJiraIdsCount++;
+                continue;
+            }
             let jiraId = log.jira_worklog_id._text;
             let sql = 'UPDATE ' + process.env.DB_NAME + '.worklog SET AUTHOR = "' + user + '", UPDATEAUTHOR = "' + user + '" WHERE ID = "' + jiraId + '"';
             con.query(sql, function (err) {
@@ -67,6 +87,8 @@ Promise.all(promises).then((values) => {
             });
         }
 
+        console.log('jira_worklog_id missing count: ' + corruptedJiraIdsCount);
+        console.log('username missing count: ' + corruptedUsernamesCount);
         con.end();
     });
 });
